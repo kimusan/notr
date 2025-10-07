@@ -2,7 +2,8 @@
 
 ## [Unreleased]
 
-- 0a4a374 2025-10-07 chore(release): updated release scripts
+- 78067c7 2025-10-07 chore(release): v1.1.0
+- c5b5509 2025-10-07 chore(release): updated release scripts
 - c7a979e 2025-10-07 feat(nvim): support for the neovim plugin notr.nvim
 - d8132ad 2025-10-07 feat(FZF): better fzf integration
 
