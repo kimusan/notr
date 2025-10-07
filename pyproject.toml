@@ -1,6 +1,6 @@
 [project]
 name = "notr"
-version = "1.0.0"
+version = ""
 description = "Encrypted, extensible command line note app with sync backends"
 readme = "README.md"
 requires-python = ">=3.9"
