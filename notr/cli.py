@@ -430,6 +430,7 @@ def prompt_backend_options(backend_type: str) -> dict:
     help="Seed the note body from a file",
 )
 @click.option("--metadata", "-m", multiple=True, help="Add metadata entries key=value", metavar="KEY=VALUE")
+@click.option("--print-id", is_flag=True, help="Print the created note id")
 @click.pass_obj
 def add(
     state: CLIState,
@@ -437,6 +438,7 @@ def add(
     content: Optional[str],
     file_path: Optional[Path],
     metadata: tuple[str, ...],
+    print_id: bool,
 ):
     """Add a new note to a notebook."""
     ensure_state(state)
@@ -477,12 +479,15 @@ def add(
         payload.metadata = meta_dict
     assert state.note_store is not None
     note = state.note_store.create_note(master_key, notebook, payload)
-    console.print(
-        Panel.fit(
-            f"[green]Note #{note.id} created in notebook [bold]{note.notebook_name}[/bold][/green]",
-            border_style="green",
+    if print_id:
+        click.echo(str(note.id))
+    else:
+        console.print(
+            Panel.fit(
+                f"[green]Note #{note.id} created in notebook [bold]{note.notebook_name}[/bold][/green]",
+                border_style="green",
+            )
         )
-    )
     maybe_autosync(state, "add")
 
 
@@ -537,6 +542,45 @@ def edit(state: CLIState, notebook: str, note_id: int):
         )
     )
     maybe_autosync(state, "edit")
+
+
+@cli.command()
+@click.argument("notebook", shell_complete=complete_notebooks)
+@click.argument("note_id", type=int)
+@click.option(
+    "--file",
+    "file_path",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    help="Read updated content from file (default: stdin)",
+)
+@click.pass_obj
+def update(state: CLIState, notebook: str, note_id: int, file_path: Optional[Path]):
+    """Apply note changes from stdin or a file."""
+    ensure_state(state)
+    assert state.config is not None
+    master_key = acquire_master_key(state)
+    assert state.note_store is not None
+    if file_path:
+        try:
+            content = file_path.read_text(encoding="utf8")
+        except OSError as exc:
+            console.print(f"[red]Failed to read {file_path}: {exc}[/red]")
+            raise click.Abort()
+    else:
+        content = sys.stdin.read()
+    payload = parse_note_input(content)
+    try:
+        note = state.note_store.update_note(master_key, notebook, note_id, payload)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise click.Abort()
+    console.print(
+        Panel.fit(
+            f"[green]Note #{note.id} updated from {'file' if file_path else 'stdin'}.[/green]",
+            border_style="green",
+        )
+    )
+    maybe_autosync(state, "update")
 
 
 @cli.command()
@@ -863,6 +907,31 @@ def backend_status(state: CLIState):
     for key, value in info.items():
         table.add_row(key, str(value))
     console.print(table)
+
+
+@cli.group()
+def notebook() -> None:
+    """Notebook management commands."""
+
+
+@notebook.command("create")
+@click.argument("name")
+@click.option("--print-name", is_flag=True, help="Print the notebook name")
+@click.pass_obj
+def notebook_create(state: CLIState, name: str, print_name: bool) -> None:
+    """Ensure a notebook exists."""
+    ensure_state(state)
+    assert state.note_store is not None
+    nb = state.note_store.ensure_notebook(name)
+    if print_name:
+        click.echo(nb.name)
+    else:
+        console.print(
+            Panel.fit(
+                f"[green]Notebook '{nb.name}' is ready.[/green]",
+                border_style="green",
+            )
+        )
 
 
 @cli.command()

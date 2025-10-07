@@ -25,6 +25,11 @@ dev = [
   "pytest-cov>=4.1.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["notr*"]
+exclude = ["nvim*"]
+
 [project.urls]
 Homepage = "https://github.com/kimsul/notr"
 Issues = "https://github.com/kimsul/notr/issues"

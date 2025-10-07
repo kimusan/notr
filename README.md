@@ -57,6 +57,8 @@ Every command provides `--help`, and short aliases exist (for example `notr a` f
 | `notr login/logout` | Cache or forget the decrypted master password for the current session. |
 | `notr changemaster` | Rotate the master password without re-encrypting notes manually. |
 | `notr export [options]` | Emit FZF-friendly TSV/JSON listings of notebooks or notes. |
+| `notr update NOTEBOOK ID [--file PATH]` | Apply note changes from stdin or a file (no editor launch). |
+| `notr notebook create NAME` | Ensure a notebook exists (safe to run repeatedly). |
 
 #### FZF integration
 
@@ -78,7 +80,7 @@ notr export --scope notes --notebook "$notebook" --fields "note_id,title" --no-h
   | fzf --delimiter "\t" --with-nth=2 --preview "notr view \"$notebook\" {1} --plain"
 ```
 
-`notr export` supports TSV (default) and JSON; use `--fields` to choose which columns appear in the TSV output (for example `--fields name` or `--fields title,preview`).
+`notr export` supports TSV (default) and JSON; use `--fields` to choose columns (for example `--fields name` or `--fields title,preview`). More recipes live in [docs/FZF-INTEGRATION.md](docs/FZF-INTEGRATION.md).
 
 ## Sync & Security
 
@@ -111,6 +113,10 @@ notr completion fish > ~/.config/fish/completions/notr.fish
 ```
 
 Restart your shell (or `exec $SHELL`) to activate completions.
+
+### Neovim integration
+
+A first-party Neovim plugin lives in [`nvim/notr.nvim`](nvim/notr.nvim). It uses fzf-lua to browse notebooks/notes and edits notes in-buffer via the new `notr update` command. Installation and usage details are in that directory's README.
 
 ## Contributing & Support
 

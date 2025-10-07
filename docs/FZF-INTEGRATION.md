@@ -39,6 +39,9 @@ note_id=$(cut -f1 <<<"$selection")
 
 # open the note in your configured editor via notr edit
 notr edit "$notebook" "$note_id"
+
+# alternatively, apply changes from a scratch buffer or tool
+# cat updated.md | notr update "$notebook" "$note_id"
 ```
 
 - `--delimiter "\t"` tells fzf to split on tabs.
