@@ -56,6 +56,29 @@ Every command provides `--help`, and short aliases exist (for example `notr a` f
 | `notr backend login/logout/status` | Manage backend credentials and health. |
 | `notr login/logout` | Cache or forget the decrypted master password for the current session. |
 | `notr changemaster` | Rotate the master password without re-encrypting notes manually. |
+| `notr export [options]` | Emit FZF-friendly TSV/JSON listings of notebooks or notes. |
+
+#### FZF integration
+
+```bash
+# pick a notebook, then fuzzy match its notes
+notebook=$(notr export --scope notebooks --fields name --no-header | fzf)
+
+notr export --scope notes --notebook "$notebook" \
+  --fields "note_id,title" --no-header |
+  fzf --delimiter "\t" --with-nth=2 --preview 'notr view '"$notebook"' {1} --plain'
+```
+
+```fish
+# Fish shell variant
+notr export --scope notebooks --fields name --no-header | \
+  fzf | read --local notebook
+
+notr export --scope notes --notebook "$notebook" --fields "note_id,title" --no-header \
+  | fzf --delimiter "\t" --with-nth=2 --preview "notr view \"$notebook\" {1} --plain"
+```
+
+`notr export` supports TSV (default) and JSON; use `--fields` to choose which columns appear in the TSV output (for example `--fields name` or `--fields title,preview`).
 
 ## Sync & Security
 

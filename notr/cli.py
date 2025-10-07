@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, List, Optional
 
 import click
 
@@ -193,6 +193,23 @@ def complete_notebooks(ctx: click.Context, param, incomplete: str):
     return suggestions
 
 
+def _parse_fields(spec: Optional[str], allowed: Iterable[str], default: Iterable[str]) -> List[str]:
+    allowed_set = {field: field for field in allowed}
+    if spec:
+        fields = []
+        for item in spec.split(","):
+            key = item.strip()
+            if key not in allowed_set:
+                raise click.ClickException(
+                    f"Unknown field '{key}'. Allowed fields: {', '.join(allowed_set)}"
+                )
+            fields.append(allowed_set[key])
+        if not fields:
+            raise click.ClickException("Field list cannot be empty")
+        return fields
+    return list(default)
+
+
 def display_notebooks(state: CLIState) -> None:
     assert state.note_store is not None
     notebooks = state.note_store.list_notebooks()
@@ -238,10 +255,18 @@ def view_notes(state: CLIState, notebook_name: str) -> None:
     console.print(table)
 
 
-def view_note_detail(state: CLIState, notebook_name: str, note_id: int) -> None:
+def view_note_detail(state: CLIState, notebook_name: str, note_id: int, plain: bool = False) -> None:
     master_key = acquire_master_key(state)
     assert state.note_store is not None
     note = state.note_store.get_note(master_key, notebook_name, note_id)
+    if plain:
+        heading = f"# {note.payload.title}".rstrip()
+        body = note.payload.body
+        if body:
+            console.print(f"{heading}\n\n{body}")
+        else:
+            console.print(heading)
+        return
     header = Text(f"{note.payload.title or '(untitled)'}", style="bold underline cyan")
     metadata = Text(
         f"Notebook: {note.notebook_name} • Created: {note.created_at:%Y-%m-%d %H:%M} • Updated: {note.updated_at:%Y-%m-%d %H:%M}",
@@ -255,12 +280,16 @@ def view_note_detail(state: CLIState, notebook_name: str, note_id: int) -> None:
 def parse_note_input(content: str) -> NotePayload:
     lines = content.splitlines()
     title = "(untitled)"
-    for line in lines:
+    body_lines: List[str] = []
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if stripped:
             title = stripped.lstrip("#").strip() or stripped
+            body_lines = lines[index + 1 :]
             break
-    body = content.strip()
+    while body_lines and not body_lines[0].strip():
+        body_lines.pop(0)
+    body = "\n".join(body_lines).rstrip()
     return NotePayload(title=title or "(untitled)", body=body)
 
 
@@ -460,15 +489,20 @@ def add(
 @cli.command()
 @click.argument("notebook", required=False, shell_complete=complete_notebooks)
 @click.argument("note_id", required=False, type=int)
+@click.option("--plain", is_flag=True, help="Print raw note content without formatting")
 @click.pass_obj
-def view(state: CLIState, notebook: Optional[str], note_id: Optional[int]):
+def view(state: CLIState, notebook: Optional[str], note_id: Optional[int], plain: bool):
     """View notebooks, notes, or note details."""
     ensure_state(state)
     if notebook and note_id:
-        view_note_detail(state, notebook, note_id)
+        view_note_detail(state, notebook, note_id, plain=plain)
     elif notebook:
+        if plain:
+            console.print("[yellow]--plain is only valid when viewing a specific note.[/yellow]")
         view_notes(state, notebook)
     else:
+        if plain:
+            console.print("[yellow]--plain is only valid when viewing a specific note.[/yellow]")
         display_notebooks(state)
 
 
@@ -483,7 +517,11 @@ def edit(state: CLIState, notebook: str, note_id: int):
     master_key = acquire_master_key(state)
     assert state.note_store is not None
     note = state.note_store.get_note(master_key, notebook, note_id)
-    template = f"{note.payload.title}\n{note.payload.body}\n"
+    heading = f"# {note.payload.title}".rstrip()
+    if note.payload.body:
+        template = f"{heading}\n\n{note.payload.body}\n"
+    else:
+        template = f"{heading}\n\n"
     editor = state.config.options.editor if state.config and state.config.options.editor else None
     edited = click.edit(template, editor=editor)
     if edited is None:
@@ -627,6 +665,133 @@ def render_search_results(results, query: str, fuzzy: bool = False) -> None:
             note.updated_at.strftime("%Y-%m-%d %H:%M"),
         )
     console.print(table)
+
+
+@cli.command()
+@click.option(
+    "--scope",
+    type=click.Choice(["notebooks", "notes"]),
+    default="notebooks",
+    show_default=True,
+    help="Export notebooks or notes",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["tsv", "json"]),
+    default="tsv",
+    show_default=True,
+    help="Output format",
+)
+@click.option(
+    "--no-header",
+    is_flag=True,
+    help="Omit header row in TSV output",
+)
+@click.option(
+    "--fields",
+    help="Comma-separated list of columns to include in TSV output",
+)
+@click.option(
+    "--notebook",
+    "notebook_filter",
+    shell_complete=complete_notebooks,
+    help="Limit notes export to a specific notebook",
+)
+@click.pass_obj
+def export(
+    state: CLIState,
+    scope: str,
+    fmt: str,
+    no_header: bool,
+    fields: Optional[str],
+    notebook_filter: Optional[str],
+):
+    """Emit machine-friendly notebook/note listings for tools like fzf."""
+    ensure_state(state)
+    assert state.note_store is not None
+
+    if fmt == "json":
+        import json
+
+    if scope == "notebooks":
+        notebooks = state.note_store.list_notebooks()
+        counts = state.note_store.notebook_counts()
+        if fmt == "json":
+            payload = [
+                {
+                    "uuid": nb.uuid,
+                    "name": nb.name,
+                    "note_count": counts.get(nb.name, 0),
+                    "created_at": nb.created_at.isoformat(),
+                    "updated_at": nb.updated_at.isoformat(),
+                }
+                for nb in notebooks
+            ]
+            click.echo(json.dumps(payload))
+        else:
+            field_map = {
+                "uuid": lambda nb: nb.uuid,
+                "name": lambda nb: nb.name,
+                "note_count": lambda nb: str(counts.get(nb.name, 0)),
+                "created_at": lambda nb: nb.created_at.isoformat(),
+                "updated_at": lambda nb: nb.updated_at.isoformat(),
+            }
+            selected_fields = _parse_fields(fields, field_map.keys(), default=[
+                "uuid",
+                "name",
+                "note_count",
+                "created_at",
+                "updated_at",
+            ])
+            if not no_header:
+                click.echo("\t".join(selected_fields))
+            for nb in notebooks:
+                row = [field_map[field](nb) for field in selected_fields]
+                click.echo("\t".join(row))
+        return
+
+    # scope == notes
+    master_key = acquire_master_key(state)
+    notes = state.note_store.list_notes(master_key, notebook_filter)
+    if fmt == "json":
+        import json
+
+        payload = [
+            {
+                "note_id": note.id,
+                "uuid": note.uuid,
+                "notebook_uuid": note.notebook_uuid,
+                "notebook": note.notebook_name,
+                "title": note.payload.title,
+                "created_at": note.created_at.isoformat(),
+                "updated_at": note.updated_at.isoformat(),
+                "preview": note.payload.body.splitlines()[0] if note.payload.body else "",
+            }
+            for note in notes
+        ]
+        click.echo(json.dumps(payload))
+    else:
+        field_map = {
+            "note_id": lambda n: str(n.id),
+            "note_uuid": lambda n: n.uuid,
+            "notebook_uuid": lambda n: n.notebook_uuid,
+            "notebook": lambda n: n.notebook_name,
+            "title": lambda n: n.payload.title,
+            "created_at": lambda n: n.created_at.isoformat(),
+            "updated_at": lambda n: n.updated_at.isoformat(),
+            "preview": lambda n: (n.payload.body.splitlines()[0] if n.payload.body else ""),
+        }
+        selected_fields = _parse_fields(fields, field_map.keys(), default=[
+            "note_id",
+            "title",
+            "preview",
+        ])
+        if not no_header:
+            click.echo("\t".join(selected_fields))
+        for note in notes:
+            row = [field_map[field](note) for field in selected_fields]
+            click.echo("\t".join(row))
 
 
 @cli.command()
