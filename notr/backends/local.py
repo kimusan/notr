@@ -10,8 +10,8 @@ from .base import Backend, SyncDirection, SyncResult
 class LocalBackend(Backend):
     """Synchronises the database file with a directory on the local filesystem."""
 
-    def __init__(self, options, secret_store, secret_id):
-        super().__init__(options, secret_store, secret_id)
+    def __init__(self, options, secret_store, secret_id, ssl_verify: bool = True):
+        super().__init__(options, secret_store, secret_id, ssl_verify=ssl_verify)
         directory = options.get("directory") or "~/.local/share/notr/remote"
         self.remote_dir = Path(directory).expanduser()
         self.remote_filename = options.get("filename", "notr.db")

@@ -31,10 +31,18 @@ class SyncResult:
 
 
 class Backend:
-    def __init__(self, options: Dict[str, Any], secret_store: SecretStore, secret_id: str):
+    def __init__(
+        self,
+        options: Dict[str, Any],
+        secret_store: SecretStore,
+        secret_id: str,
+        *,
+        ssl_verify: bool = True,
+    ):
         self.options = options
         self.secret_store = secret_store
         self.secret_id = secret_id
+        self.ssl_verify = ssl_verify
 
     @property
     def name(self) -> str:
@@ -89,7 +97,7 @@ def backend_secret_id(config: BackendConfig) -> str:
     return hashlib.sha256(data.encode("utf8")).hexdigest()
 
 
-def create_backend(config: BackendConfig) -> Backend:
+def create_backend(config: BackendConfig, *, ssl_verify: bool = True) -> Backend:
     from .local import LocalBackend
     from .webdav import WebDAVBackend
 
@@ -103,7 +111,7 @@ def create_backend(config: BackendConfig) -> Backend:
     backend_cls = backend_map.get(backend_type)
     if not backend_cls:
         raise BackendError(f"Unsupported backend type '{config.type}'")
-    instance = backend_cls(config.options, secret_store, secret_id)
+    instance = backend_cls(config.options, secret_store, secret_id, ssl_verify=ssl_verify)
     # Persist secret id for future lookups.
     config.options["secret_id"] = secret_id
     return instance

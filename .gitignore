@@ -30,13 +30,13 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
+.venv-release/
 # Editor directories and files
 .idea/
 .vscode/
 *.swp
 *.swo
-
+node_modules/
 # Project specific
 .mypy_cache/
 .pytest_cache/

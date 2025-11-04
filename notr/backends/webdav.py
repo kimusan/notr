@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import email.utils
+import ssl
 from http import HTTPStatus
 from pathlib import Path
 from typing import Optional
@@ -15,8 +16,8 @@ from .base import Backend, SyncDirection, SyncResult
 class WebDAVBackend(Backend):
     """Synchronises the database via WebDAV."""
 
-    def __init__(self, options, secret_store, secret_id):
-        super().__init__(options, secret_store, secret_id)
+    def __init__(self, options, secret_store, secret_id, ssl_verify: bool = True):
+        super().__init__(options, secret_store, secret_id, ssl_verify=ssl_verify)
         url = options.get("url")
         if not url:
             raise BackendError("WebDAV backend requires a 'url' option")
@@ -66,9 +67,7 @@ class WebDAVBackend(Backend):
                     return SyncResult(uploaded=True, message="Uploaded newer local database")
                 return SyncResult(message="Remote and local databases are already in sync")
         except httpx.RequestError as exc:
-            raise BackendError(
-                f"Could not reach WebDAV server at {self.base_url}: {exc}"
-            ) from exc
+            raise self._connection_error(exc) from exc
 
     def download(self, target: Path) -> bool:
         password = self._load_password()
@@ -80,9 +79,7 @@ class WebDAVBackend(Backend):
             with self._client(password) as client:
                 response = client.get(self._remote_file_url())
         except httpx.RequestError as exc:
-            raise BackendError(
-                f"Could not reach WebDAV server at {self.base_url}: {exc}"
-            ) from exc
+            raise self._connection_error(exc) from exc
         if response.status_code == 404:
             return False
         if response.status_code != 200:
@@ -106,9 +103,7 @@ class WebDAVBackend(Backend):
                 self._ensure_remote_directory(client)
                 self._upload(client, source)
         except httpx.RequestError as exc:
-            raise BackendError(
-                f"Could not reach WebDAV server at {self.base_url}: {exc}"
-            ) from exc
+            raise self._connection_error(exc) from exc
 
     def status(self):
         password = self._load_password()
@@ -138,7 +133,7 @@ class WebDAVBackend(Backend):
     # Internals -----------------------------------------------------------
     def _client(self, password: str) -> httpx.Client:
         auth = (self.username, password)
-        return httpx.Client(auth=auth, timeout=self.timeout)
+        return httpx.Client(auth=auth, timeout=self.timeout, verify=self.ssl_verify)
 
     def _remote_file_url(self) -> str:
         path = "/".join(
@@ -234,3 +229,28 @@ class WebDAVBackend(Backend):
         if hint:
             return f"{status_code} {phrase} — {hint}"
         return f"{status_code} {phrase}"
+
+    def _connection_error(self, exc: httpx.RequestError) -> BackendError:
+        if self._is_certificate_error(exc):
+            return BackendError(
+                f"TLS certificate verification failed when connecting to {self.base_url}. "
+                "If you trust this server, rerun the command with the --no-ssl-verify option."
+            )
+        return BackendError(f"Could not reach WebDAV server at {self.base_url}: {exc}")
+
+    def _is_certificate_error(self, exc: Exception) -> bool:
+        current = exc
+        inspected = set()
+        while current is not None and id(current) not in inspected:
+            inspected.add(id(current))
+            if isinstance(current, ssl.SSLCertVerificationError):
+                return True
+            message = str(current).lower()
+            if "certificate verify failed" in message or "self signed certificate" in message:
+                return True
+            next_cause = getattr(current, "__cause__", None)
+            if next_cause is not None:
+                current = next_cause
+                continue
+            current = getattr(current, "__context__", None)
+        return False

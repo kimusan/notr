@@ -54,7 +54,7 @@ DEFAULT_SECRET_ITERATIONS = 200_000
 
 
 class CLIState:
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, ssl_verify: bool = True):
         path = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
         self.config_manager = ConfigManager(path)
         self.config: Optional[NotrConfig] = None
@@ -66,6 +66,7 @@ class CLIState:
         self._backend = None
         self._master_key: Optional[bytes] = None
         self._loaded = False
+        self.ssl_verify = ssl_verify
 
     def ensure_loaded(self) -> None:
         if self._loaded:
@@ -79,7 +80,7 @@ class CLIState:
         crypto = CryptoManager(config.encryption)
         session = SessionManager(self.config_manager.path)
         note_store = NoteStore(db, crypto)
-        backend = create_backend(config.backend)
+        backend = create_backend(config.backend, ssl_verify=self.ssl_verify)
         sync_service = SyncService(db, backend, SyncProgress(console))
 
         # Persist secret identifier if newly generated.
@@ -139,10 +140,15 @@ class CLIState:
     type=click.Path(dir_okay=False, path_type=str),
     help=f"Path to notr config file (default: {DEFAULT_CONFIG_PATH})",
 )
+@click.option(
+    "--no-ssl-verify",
+    is_flag=True,
+    help="Disable SSL certificate verification for remote connections (insecure).",
+)
 @click.pass_context
-def cli(ctx: click.Context, config_path: Optional[str]):
+def cli(ctx: click.Context, config_path: Optional[str], no_ssl_verify: bool):
     """Encrypted, extensible command line note app."""
-    ctx.obj = CLIState(config_path=config_path)
+    ctx.obj = CLIState(config_path=config_path, ssl_verify=not no_ssl_verify)
 
 
 def ensure_state(state: CLIState) -> None:
@@ -473,7 +479,7 @@ def import_secret(ctx: click.Context, secret: Optional[str], force: bool):
             console.print("[yellow]Import cancelled.[/yellow]")
             return
 
-    backend_instance = create_backend(config.backend)
+    backend_instance = create_backend(config.backend, ssl_verify=state.ssl_verify)
     if backend_password:
         try:
             backend_instance.login(backend_password)
@@ -517,7 +523,7 @@ def init(state: CLIState, db_path: Optional[str]):
         backend_type = prompt_backend_type()
         backend_options = dict(prompt_backend_options(backend_type))
         temp_backend_config = BackendConfig(type=backend_type, options=backend_options)
-        backend_instance = create_backend(temp_backend_config)
+        backend_instance = create_backend(temp_backend_config, ssl_verify=state.ssl_verify)
         backend_options["secret_id"] = backend_instance.secret_id
         backend_instance.options["secret_id"] = backend_instance.secret_id
 
