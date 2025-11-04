@@ -58,10 +58,10 @@ class WebDAVBackend(Backend):
                     self._upload(client, local_path)
                     return SyncResult(uploaded=True, message="Uploaded initial database to WebDAV")
                 local_mtime = local_path.stat().st_mtime
-                if remote_mtime > local_mtime:
+                if remote_mtime > local_mtime + 1:
                     self._download(client, local_path)
                     return SyncResult(downloaded=True, message="Downloaded newer remote database")
-                elif local_mtime > remote_mtime:
+                elif local_mtime > remote_mtime + 1:
                     self._upload(client, local_path)
                     return SyncResult(uploaded=True, message="Uploaded newer local database")
                 return SyncResult(message="Remote and local databases are already in sync")

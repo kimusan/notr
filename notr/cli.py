@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import base64
+import io
+import json
 import os
 import sys
+import zlib
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -19,9 +23,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+try:
+    import qrcode
+except Exception:  # pragma: no cover - optional dependency
+    qrcode = None  # type: ignore
+
 from .backends import SyncDirection, create_backend
 from .config import BackendConfig, ConfigManager, DEFAULT_CONFIG_PATH, NotrConfig, OptionsConfig
-from .crypto import CryptoManager
+from .crypto import CryptoManager, NOTE_NONCE_LENGTH, derive_password_key
 from .db import DatabaseManager
 from .errors import AuthenticationError, BackendError, NotrError
 from .models import NotePayload
@@ -38,6 +49,8 @@ rich_click.SHOW_OPTION_TABLE = True
 
 
 console = Console()
+SECRET_FORMAT = "notr-config/v1"
+DEFAULT_SECRET_ITERATIONS = 200_000
 
 
 class CLIState:
@@ -193,6 +206,54 @@ def complete_notebooks(ctx: click.Context, param, incomplete: str):
     return suggestions
 
 
+def _encrypt_secret_bundle(password: str, payload: dict, iterations: int = DEFAULT_SECRET_ITERATIONS) -> dict:
+    data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf8")
+    salt = os.urandom(16)
+    key = derive_password_key(password, salt, iterations)
+    nonce = os.urandom(NOTE_NONCE_LENGTH)
+    aesgcm = AESGCM(key)
+    ciphertext = aesgcm.encrypt(nonce, data, None)
+    return {
+        "format": SECRET_FORMAT,
+        "iterations": iterations,
+        "salt": base64.urlsafe_b64encode(salt).decode("utf8"),
+        "nonce": base64.urlsafe_b64encode(nonce).decode("utf8"),
+        "ciphertext": base64.urlsafe_b64encode(ciphertext).decode("utf8"),
+}
+
+
+def _decrypt_secret_bundle(password: str, secret: dict) -> dict:
+    if secret.get("format") != SECRET_FORMAT:
+        raise NotrError("Unsupported secret format. Expected notr-config/v1")
+    try:
+        iterations = int(secret.get("iterations", DEFAULT_SECRET_ITERATIONS))
+        salt = base64.urlsafe_b64decode(secret["salt"].encode("utf8"))
+        nonce = base64.urlsafe_b64decode(secret["nonce"].encode("utf8"))
+        ciphertext = base64.urlsafe_b64decode(secret["ciphertext"].encode("utf8"))
+    except Exception as exc:
+        raise NotrError("Secret is malformed.") from exc
+    key = derive_password_key(password, salt, iterations)
+    aesgcm = AESGCM(key)
+    try:
+        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+    except Exception as exc:
+        raise AuthenticationError("Invalid password for secret bundle.") from exc
+    return json.loads(plaintext.decode("utf8"))
+
+
+def _compress_secret(raw: str) -> str:
+    compressed = zlib.compress(raw.encode("utf8"))
+    return base64.urlsafe_b64encode(compressed).decode("utf8")
+
+
+def _maybe_decompress_secret(secret: str) -> Optional[str]:
+    try:
+        data = base64.urlsafe_b64decode(secret.encode("utf8"))
+        return zlib.decompress(data).decode("utf8")
+    except Exception:
+        return None
+
+
 def _parse_fields(spec: Optional[str], allowed: Iterable[str], default: Iterable[str]) -> List[str]:
     allowed_set = {field: field for field in allowed}
     if spec:
@@ -291,6 +352,136 @@ def parse_note_input(content: str) -> NotePayload:
         body_lines.pop(0)
     body = "\n".join(body_lines).rstrip()
     return NotePayload(title=title or "(untitled)", body=body)
+
+
+@cli.command("share-secret")
+@click.option("--iterations", type=int, default=DEFAULT_SECRET_ITERATIONS, show_default=True, help="PBKDF2 iterations")
+@click.pass_obj
+def share_secret(state: CLIState, iterations: int):
+    """Generate a portable secret bundle for importing into another client."""
+    ensure_state(state)
+    assert state.config is not None
+    assert state.crypto is not None
+
+    password = click.prompt("Master password", hide_input=True)
+    try:
+        master_key = state.crypto.decrypt_master_key(password)
+    except Exception as exc:
+        raise click.ClickException("Invalid master password.") from exc
+    state.store_master_key(master_key)
+
+    backend_password = None
+    backend = state.backend()
+    try:
+        backend_password = backend._load_password()  # type: ignore[attr-defined]
+    except Exception:
+        backend_password = None
+
+    bundle = {
+        "config": state.config.dict(),
+        "backend_password": backend_password,
+    }
+    encrypted = _encrypt_secret_bundle(password, bundle, iterations=iterations)
+    payload_json = json.dumps(encrypted, separators=(",", ":"))
+    secret_string = payload_json
+    compressed_secret = _compress_secret(payload_json)
+
+    console.print("[green]Secret bundle generated. Keep this confidential.[/green]")
+    console.print(Text(secret_string, style="bold"))
+    console.print("[cyan]QR code encodes a compressed version of the secret.[/cyan]")
+    console.print("Compressed secret (for quick entry):")
+    console.print(Text(compressed_secret, style="dim"))
+
+    if qrcode is not None:
+        try:
+            qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_Q, box_size=1, border=1)
+            qr.add_data(compressed_secret)
+            qr.make(fit=True)
+            buf = io.StringIO()
+            qr.print_ascii(out=buf, invert=True)
+            console.print(buf.getvalue())
+        except Exception:
+            console.print("[yellow]QR rendering failed; falling back to string output only.[/yellow]")
+    else:
+        console.print("[yellow]Install the 'qrcode' package to print a QR code.[/yellow]")
+
+
+@cli.command("import-secret")
+@click.argument("secret", required=False)
+@click.option("--force", is_flag=True, help="Overwrite existing configuration without confirmation.")
+@click.pass_context
+def import_secret(ctx: click.Context, secret: Optional[str], force: bool):
+    """Import a secret bundle previously generated with share-secret."""
+    state: CLIState = ctx.ensure_object(CLIState)
+    manager = state.config_manager
+
+    if secret is None or not secret.strip():
+        secret = click.prompt("Paste secret bundle", hide_input=False)
+    secret = secret.strip()
+
+    payload: Optional[dict] = None
+
+    # Try raw JSON
+    try:
+        payload = json.loads(secret)
+    except Exception:
+        payload = None
+
+    # Try compressed base64
+    if payload is None:
+        decompressed = _maybe_decompress_secret(secret)
+        if decompressed:
+            try:
+                payload = json.loads(decompressed)
+            except Exception:
+                payload = None
+
+    # Try base64 (legacy)
+    if payload is None:
+        try:
+            decoded = base64.urlsafe_b64decode(secret.encode("utf8")).decode("utf8")
+            payload = json.loads(decoded)
+        except Exception:
+            payload = None
+
+    if payload is None:
+        raise click.ClickException("Unable to parse secret bundle.")
+
+    password = click.prompt("Master password", hide_input=True)
+    try:
+        decrypted = _decrypt_secret_bundle(password, payload)
+    except AuthenticationError as exc:
+        raise click.ClickException(str(exc))
+    except NotrError as exc:
+        raise click.ClickException(str(exc))
+
+    config_data = decrypted.get("config")
+    if not isinstance(config_data, dict):
+        raise click.ClickException("Secret bundle does not contain configuration data.")
+    backend_password = decrypted.get("backend_password")
+
+    try:
+        config = NotrConfig.parse_obj(config_data)
+    except Exception as exc:
+        raise click.ClickException(f"Configuration in secret bundle is invalid: {exc}")
+
+    if manager.exists() and not force:
+        proceed = click.confirm(
+            f"Configuration already exists at {manager.path}. Overwrite?", default=False
+        )
+        if not proceed:
+            console.print("[yellow]Import cancelled.[/yellow]")
+            return
+
+    backend_instance = create_backend(config.backend)
+    if backend_password:
+        try:
+            backend_instance.login(backend_password)
+        except BackendError as exc:
+            raise click.ClickException(f"Failed to store backend credentials: {exc}")
+
+    manager.save(config)
+    console.print(f"[green]Configuration imported to {manager.path}.[/green]")
 
 
 @cli.command()

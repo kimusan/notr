@@ -108,6 +108,40 @@ class DatabaseManager:
             return row["value"]
         return None
 
+    def checkpoint(self, mode: str = "TRUNCATE") -> None:
+        """Flush WAL contents into the main database file."""
+        mode = mode.upper()
+        if mode not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:
+            mode = "TRUNCATE"
+        self.execute(f"PRAGMA wal_checkpoint({mode})")
+
+    def replace_with(self, source: Path) -> None:
+        """Replace the current database with the contents of ``source`` using sqlite backup."""
+        import sqlite3
+
+        src_path = Path(source)
+        if not src_path.exists():
+            raise FileNotFoundError(f"Source database not found at {src_path}")
+
+        wal_path = self.db_path.parent / f"{self.db_path.name}-wal"
+        shm_path = self.db_path.parent / f"{self.db_path.name}-shm"
+
+        tmp_copy = self.db_path.with_suffix(".tmp_replace")
+        try:
+            tmp_copy.write_bytes(src_path.read_bytes())
+            tmp_copy.replace(self.db_path)
+        finally:
+            if tmp_copy.exists():
+                tmp_copy.unlink()
+
+        if wal_path.exists():
+            wal_path.unlink()
+        if shm_path.exists():
+            shm_path.unlink()
+
+        # Ensure schema/indexes match expectations after replacement
+        self.ensure_initialized()
+
     # Schema migrations --------------------------------------------------
     def _migrate_schema(self) -> None:
         with self.connection() as conn:
